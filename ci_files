@@ -1,0 +1,102 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  deploy:
+    name: Pull Latest Code
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Pull Latest Code on VPS
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.PORT }}
+          script: |
+            set -ev
+
+            cd /root/Product_Management
+
+            git fetch origin
+  #           git checkout feature/Audit
+  #           git pull origin feature/Audit
+
+  #           echo "deploying"
+  #           cd /backend
+  #           source venv/bin/activate
+  #           pip install -r requirements.txt
+  #           deactivate
+  #           systemctl restart product-management
+  #           sleep 3
+  #           systemctl status product-management --no-pager | tail -8
+
+  # frontend:
+  #   name: Build & Restart Frontend
+  #   needs: deploy
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #     - name: Build Frontend on VPS
+  #       uses: appleboy/ssh-action@v1.2.2
+  #       with:
+  #         host: ${{ secrets.VPS_HOST }}
+  #         username: ${{ secrets.VPS_USER }}
+  #         key: ${{ secrets.VPS_SSH_KEY }}
+  #         port: ${{ secrets.PORT }}
+  #         script: |
+  #           set -ev
+
+  #           cd /root/Product_Management/frontend
+
+  #           echo "Installing dependencies..."
+  #           npm install
+
+  #           echo "Building frontend..."
+  #           npm run build
+
+  # health:
+  #   name: Health Check
+  #   needs:
+  #     - deploy
+  #     - frontend
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #     - name: Verify Application Health
+  #       uses: appleboy/ssh-action@v1.2.2
+  #       with:
+  #         host: ${{ secrets.VPS_HOST }}
+  #         username: ${{ secrets.VPS_USER }}
+  #         key: ${{ secrets.VPS_SSH_KEY }}
+  #         port: ${{ secrets.PORT }}
+  #         script: |
+  #           set -e
+
+  #           echo "Checking backend health..."
+  #           BACKEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health)
+  #           echo "Backend HTTP Status: $BACKEND_STATUS"
+
+  #           if [ "$BACKEND_STATUS" != "200" ]; then
+  #             echo "Backend health check failed"
+  #             exit 1
+  #           fi
+
+  #           echo "Checking frontend health..."
+  #           FRONTEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://tdowebapp.dtlamarketing.com/)
+  #           echo "Frontend HTTP Status: $FRONTEND_STATUS"
+
+  #           if [ "$FRONTEND_STATUS" != "200" ]; then
+  #             echo "Frontend health check failed"
+  #             exit 1
+  #           fi
+
+  #           echo "✅ All health checks passed."
