@@ -100,3 +100,10 @@ jobs:
   #           fi
 
   #           echo "✅ All health checks passed."
+
+
+
+
+
+
+systemctl list-units --type=service --state=running
