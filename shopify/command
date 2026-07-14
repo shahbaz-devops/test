@@ -1,0 +1,6 @@
+docker run -d \
+  --name shopify-filter-app \
+  --env-file .env \
+  -p 3005:3005 \
+  --restart always \
+  shopify-filter-app:latest
