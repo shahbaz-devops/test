@@ -37,3 +37,8 @@ RUN npm run build
 
 CMD ["npm", "run", "docker-start"]
 
+==========================================================================
+
+i-search)`ru': docker run -d   --name shopify-filter-app   --env-file .env   -p 3005:3005   --restart always   shopify-filter-app:latest
+
+
