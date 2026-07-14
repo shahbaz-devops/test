@@ -40,5 +40,27 @@ CMD ["npm", "run", "docker-start"]
 ==========================================================================
 
 i-search)`ru': docker run -d   --name shopify-filter-app   --env-file .env   -p 3005:3005   --restart always   shopify-filter-app:latest
+===================================================================================
+
+FROM node:20-alpine
+
+RUN apk add --no-cache openssl
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY package*.json ./
+
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY . .
+
+RUN npm run build
+
+EXPOSE 3000
+
+CMD ["sh", "-c", "npx prisma generate && npx prisma db push && npm run docker-start"]
+
 
 
