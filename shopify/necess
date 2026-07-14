@@ -1,0 +1,7 @@
+PORT=3005
+SHOPIFY_API_KEY=f02601eed3e06bd0922c614d7f4084b9
+SHOPIFY_API_SECRET=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
+SCOPES=read_inventory,read_locations,read_themes,write_metaobject_definitions,write_metaobjects,write_products
+SHOPIFY_APP_URL=https://aisearchfilter.webvory.com
+PRISMA_CLIENT_ENGINE_TYPE="binary"
+DATABASE_URL=postgresql://webvory:d5544332211Q@database-1.cf2yay06wgnh.ap-south-1.rds.amazonaws.com:5432/ai_search_filter_db?sslmode=require&connection_limit=20&pool_timeout=30
