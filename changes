@@ -48,5 +48,34 @@ export default defineConfig({
     },
   },
 });
+=====================================================================================================
 
+mport { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    strictPort: true,
+    allowedHosts: [
+      "navigably-pulverisable-rosalia.ngrok-free.dev",
+      ".ngrok-free.dev" // Also allows future ngrok subdomains!
+    ],
+    proxy: {
+      "/api": {
+        target: "http://product-dashboard-api:8000",
+        changeOrigin: true,
+      },
+      "/uploads": {
+        target: "http://product-dashboard-api:8000",
+        changeOrigin: true,
+      },
+      "/socket.io": {
+        target: "http://product-dashboard-api:8000",
+        ws: true,
+      },
+    },
+  },
+});
   
