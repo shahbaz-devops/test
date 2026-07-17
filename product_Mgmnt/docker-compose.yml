@@ -1,0 +1,61 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: dashboard-redis
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
+    volumes:
+      - redis-data:/data
+
+
+  product-dashboard-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    image: product-dashboard-api
+    container_name: product-dashboard-api
+    restart: unless-stopped
+
+    depends_on:
+      - redis
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ./backend/data:/app/data
+
+    environment:
+      DB_PATH: /app/data/app.db
+      DATA_DB_PATH: /app/data/data.db
+      INSTOCK_DB_PATH: /app/data/in_stock_3.db
+      REDIS_URL: redis://redis:6379/0
+
+
+  product-dashboard-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+    image: product-dashboard-frontend
+    container_name: product-dashboard-frontend
+    restart: unless-stopped
+
+    depends_on:
+      - product-dashboard-api
+
+    ports:
+      - "3000:5173"
+
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+
+volumes:
+  redis-data:
