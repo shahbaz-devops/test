@@ -1,0 +1,110 @@
+just change yml with this and give docker compose down and up 
+
+
+  ====================  correct ==============================
+
+
+  version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: wholesale-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: wholesale_db
+
+    ports:
+      - "5433:5432"
+
+    volumes:
+      - wholesale_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d wholesale_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wholesale-app:
+    image: 450367038243.dkr.ecr.us-west-1.amazonaws.com/shopify-wholesale-app:latest
+    container_name: wholesale-app
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    ports:
+      - "3010:3000"
+
+    env_file:
+      - .env
+
+    command: >
+      sh -c "
+      npx prisma migrate deploy &&
+      npm run start
+      "
+
+volumes:
+  wholesale_postgres_data:
+
+
+================================  OLD ONE ON VPS   +++++++++++++++++++++++++++++++++++++++++++++++++
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: wholesale-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: wholesale_db
+
+    ports:
+      - "5433:5432"
+
+    volumes:
+      - wholesale_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d wholesale_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wholesale-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: wholesale-app
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    ports:
+      - "3010:3000"
+
+    env_file:
+      - .env
+
+    command: >
+      sh -c "
+      npx prisma migrate deploy &&
+      npm run start
+      "
+
+volumes:
+  wholesale_postgres_data:
+  
