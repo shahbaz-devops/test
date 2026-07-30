@@ -1,0 +1,59 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    container_name: hr-ats-backend
+    restart: unless-stopped
+
+    env_file:
+      - ./backend/.env
+
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+      HF_HUB_CACHE: /root/.cache/huggingface
+
+    ports:
+      - "8012:8000"
+
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/uploads:/app/uploads
+      - hf-cache:/root/.cache/huggingface
+
+    networks:
+      - hr-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+      args:
+        NEXT_PUBLIC_API_BASE_URL: "https://hr.dtlamarketing.com"
+
+    container_name: hr-ats-frontend
+    restart: unless-stopped
+
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: "https://hr.dtlamarketing.com"
+
+    ports:
+      - "3006:3000"
+
+    depends_on:
+      - backend
+
+    networks:
+      - hr-network
+
+networks:
+  hr-network:
+    driver: bridge
+
+volumes:
+  hf-cache:
+    name: hr-ats_hf-cache
+    external: true
