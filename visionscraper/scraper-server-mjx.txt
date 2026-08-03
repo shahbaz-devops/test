@@ -1,0 +1,360 @@
+import cors from "cors";
+import express from "express";
+import { randomUUID } from "node:crypto";
+import { createWriteStream, mkdirSync } from "node:fs";
+import { createServer } from "node:http";
+import { resolve } from "node:path";
+import { chromium } from "playwright";
+import { WebSocketServer, WebSocket } from "ws";
+
+const PORT = Number(process.env.SCRAPER_PORT || 8788);
+const VIEWPORT = { width: 1280, height: 800 };
+const LOG_DIR = resolve(process.env.SCRAPER_LOG_DIR || "logs");
+mkdirSync(LOG_DIR, { recursive: true });
+const activityLog = createWriteStream(resolve(LOG_DIR, "scraper.log"), { flags: "a" });
+const errorLog = createWriteStream(resolve(LOG_DIR, "error.log"), { flags: "a" });
+
+const safeUrl = (value) => {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return String(value || "");
+  }
+};
+const errorDetails = (error) => ({
+  name: error?.name || "Error",
+  message: error?.message || String(error),
+  stack: error?.stack,
+  code: error?.code,
+});
+const log = (level, event, details = {}) => {
+  const entry = { timestamp: new Date().toISOString(), level, event, ...details };
+  const line = JSON.stringify(entry);
+  activityLog.write(`${line}\n`);
+  if (level === "error") errorLog.write(`${line}\n`);
+  const terminal = `[${entry.timestamp}] ${level.toUpperCase()} ${event}`;
+  const metadata = Object.keys(details).length ? details : "";
+  (level === "error" ? console.error : level === "warn" ? console.warn : console.log)(terminal, metadata);
+};
+activityLog.on("error", (error) => console.error("Activity log write failed", error));
+errorLog.on("error", (error) => console.error("Error log write failed", error));
+
+const app = express();
+app.use(cors());
+app.use((request, response, next) => {
+  const startedAt = Date.now();
+  response.on("finish", () => {
+    if (request.path !== "/health") {
+      log("info", "http_request", { method: request.method, path: request.path, status: response.statusCode, durationMs: Date.now() - startedAt });
+    }
+  });
+  next();
+});
+app.get("/", (_request, response) => {
+  response.status(200).type("html").send(`
+    <html>
+      <head><title>Harvest backend</title></head>
+      <body style="font-family:Arial;background:#f5f1e8;color:#14251d;text-align:center;padding:15vh 20px">
+        <h1>Harvest backend is running</h1>
+        <p>Keep this terminal open. Run <code>npm run dev</code> in a second terminal and open the Local URL it prints.</p>
+      </body>
+    </html>
+  `);
+});
+app.get("/health", (_request, response) => response.json({ ok: true }));
+const server = createServer(app);
+const sockets = new WebSocketServer({ server });
+
+process.on("unhandledRejection", (reason) => log("error", "unhandled_rejection", { error: errorDetails(reason) }));
+process.on("uncaughtException", (error) => {
+  log("error", "uncaught_exception", { error: errorDetails(error) });
+  setTimeout(() => process.exit(1), 100);
+});
+server.on("error", (error) => log("error", "server_error", { port: PORT, error: errorDetails(error) }));
+sockets.on("error", (error) => log("error", "websocket_server_error", { error: errorDetails(error) }));
+
+const send = (socket, payload) => {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+};
+const cleanUrl = (value) => {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+  } catch { return null; }
+};
+const dedupe = (assets) => {
+  const seen = new Set();
+  return assets.filter((asset) => {
+    if (!asset?.url || seen.has(asset.url)) return false;
+    seen.add(asset.url);
+    return true;
+  });
+};
+
+async function extractPageMedia(page) {
+  return page.evaluate(() => {
+    const absolute = (value) => {
+      try { return new URL(value, location.href).href; } catch { return ""; }
+    };
+    const productJson = [...document.querySelectorAll('script[type="application/ld+json"]')]
+      .flatMap((script) => {
+        try {
+          const value = JSON.parse(script.textContent || "null");
+          return Array.isArray(value) ? value : [value, ...(value?.["@graph"] || [])];
+        } catch { return []; }
+      })
+      .find((value) => value?.["@type"] === "Product" || value?.["@type"]?.includes?.("Product"));
+    const structuredImages = [productJson?.image].flat(2).filter(Boolean).map((item) => ({
+      url: absolute(typeof item === "string" ? item : item.url || item.contentUrl),
+      type: "image", source: "page", alt: productJson?.name || "",
+    }));
+    const heading = document.querySelector("h1");
+    const scope =
+      heading?.closest('[class*="product" i], [id*="product" i], main, [role="main"]') ||
+      document.querySelector('[class*="product-gallery" i], [class*="product-media" i], [data-product-gallery], main, [role="main"]') ||
+      document.body;
+    const recommendationPattern = /recommend|related|recently[-_\s]?viewed|you[-_\s]?may[-_\s]?also[-_\s]?like|complete[-_\s]?the[-_\s]?look|similar[-_\s]?product|suggested[-_\s]?product|upsell|cross[-_\s]?sell|product[-_\s]?(card|tile|recommendation)/i;
+    const isInsideRecommendation = (element) => {
+      let current = element;
+      while (current && current !== scope.parentElement) {
+        const descriptor = [
+          current.tagName,
+          current.id,
+          current.className,
+          current.getAttribute?.("data-section-type"),
+          current.getAttribute?.("data-section-id"),
+          current.getAttribute?.("aria-label"),
+          current.getAttribute?.("role"),
+        ].filter((value) => typeof value === "string").join(" ");
+        if (recommendationPattern.test(descriptor)) return true;
+        const directHeading = current.querySelector?.(":scope > h2, :scope > h3, :scope > header h2, :scope > header h3");
+        if (directHeading && recommendationPattern.test(directHeading.textContent || "")) return true;
+        current = current.parentElement;
+      }
+      return false;
+    };
+    const images = [...scope.querySelectorAll("img")]
+      .map((image) => {
+        const rect = image.getBoundingClientRect();
+        const width = image.naturalWidth || rect.width;
+        const height = image.naturalHeight || rect.height;
+        const preferred = image.getAttribute("data-zoom") || image.getAttribute("data-large_image") || image.currentSrc || image.src || image.getAttribute("data-src");
+        return { url: absolute(preferred), type: "image", source: "page", width, height, alt: image.alt || "", excluded: isInsideRecommendation(image) };
+      })
+      .filter((item) =>
+        item.url &&
+        !item.excluded &&
+        !item.url.startsWith("data:") &&
+        !/logo|icon|sprite|avatar|badge|swatch/i.test(`${item.url} ${item.alt}`) &&
+        item.width >= 300 &&
+        item.height >= 300
+      )
+      .sort((a, b) => (b.width * b.height) - (a.width * a.height))
+      .slice(0, 24)
+      .map(({ excluded, ...item }) => item);
+    const videos = [...scope.querySelectorAll("video, video source")]
+      .filter((node) => !isInsideRecommendation(node))
+      .map((node) => ({
+        url: absolute(node.currentSrc || node.src || node.getAttribute("data-src") || ""),
+        type: "video", source: "page",
+      }));
+    return {
+      assets: [...structuredImages, ...images, ...videos].filter((asset) => asset.url),
+      title: productJson?.name || heading?.textContent?.trim() || document.title,
+    };
+  });
+}
+
+async function extractShopify(page) {
+  const match = new URL(page.url()).pathname.match(/\/products\/([^/?#]+)/);
+  if (!match) return null;
+  try {
+    const endpoint = new URL(`/products/${match[1]}.js`, page.url()).href;
+    const response = await page.request.get(endpoint, { timeout: 8000 });
+    if (!response.ok()) return null;
+    const product = await response.json();
+    const images = (product.images || []).map((item) => ({
+      url: typeof item === "string" ? item : item.src, type: "image", source: "shopify",
+      width: item.width, height: item.height, alt: item.alt || product.title,
+    }));
+    const media = (product.media || []).flatMap((item) => {
+      if (item.media_type === "image") return [{ url: item.src || item.preview_image?.src, type: "image", source: "shopify" }];
+      if (item.media_type === "video" || item.media_type === "external_video") {
+        const sources = item.sources || [{ url: item.host === "youtube" ? `https://youtube.com/watch?v=${item.external_id}` : item.src }];
+        return sources.map((source) => ({ url: source.url || source.src, type: "video", source: "shopify" }));
+      }
+      return [];
+    });
+    return { title: product.title, assets: [...images, ...media] };
+  } catch { return null; }
+}
+
+sockets.on("connection", (socket, request) => {
+  let browser, context, page, frameTimer;
+  const publishFrame = async () => {
+        if (!page || page.isClosed()) return;
+
+        try {
+                const data = await page.screenshot({
+                        type: "jpeg",
+                        quality: 64,
+                });
+
+        send(socket, {
+                type: "frame",
+                data: data.toString("base64"),
+                ...VIEWPORT,
+                url: page.url(),
+        });
+        } catch (error) {
+                log("error", "frame_capture_failed", {
+                sessionId,
+                error: errorDetails(error),
+                });
+        }
+  };
+  let pendingScroll = 0;
+  let scrollInProgress = false;
+  const sessionId = randomUUID();
+  const connectedAt = Date.now();
+  log("info", "session_connected", {
+    sessionId,
+    remoteAddress: socket._socket?.remoteAddress,
+    origin: request.headers.origin,
+  });
+  socket.on("error", (error) => log("error", "websocket_error", { sessionId, error: errorDetails(error) }));
+
+
+  const smoothScroll = async () => {
+    if (scrollInProgress || !page || page.isClosed()) return;
+    scrollInProgress = true;
+    try {
+      while (Math.abs(pendingScroll) > 0.5 && page && !page.isClosed()) {
+        const direction = Math.sign(pendingScroll);
+        const step = direction * Math.min(180, Math.max(6, Math.abs(pendingScroll) * 0.3));
+        pendingScroll -= step;
+        await page.mouse.wheel(0, step);
+        await page.waitForTimeout(28);
+        await publishFrame();
+      }
+      pendingScroll = 0;
+    } finally {
+      scrollInProgress = false;
+      if (Math.abs(pendingScroll) > 0.5) void smoothScroll();
+    }
+  };
+  const inspect = async () => {
+    if (!page || page.isClosed()) return;
+    const startedAt = Date.now();
+    try {
+      const [shopify, pageMedia] = await Promise.all([extractShopify(page), extractPageMedia(page)]);
+      const assets = dedupe(shopify?.assets?.length ? shopify.assets : pageMedia.assets);
+      send(socket, {
+        type: "assets",
+        assets,
+        product: { title: shopify?.title || pageMedia.title, url: page.url() },
+      });
+      send(socket, { type: "status", status: "live", message: `${assets.length} product assets found` });
+      log("info", "media_extracted", {
+        sessionId,
+        url: safeUrl(page.url()),
+        source: shopify?.assets?.length ? "shopify" : "page",
+        assets: assets.length,
+        images: assets.filter((asset) => asset.type === "image").length,
+        videos: assets.filter((asset) => asset.type === "video").length,
+        durationMs: Date.now() - startedAt,
+      });
+      return assets;
+    } catch (error) {
+      log("error", "media_extraction_failed", { sessionId, url: safeUrl(page.url()), error: errorDetails(error) });
+      send(socket, { type: "error", message: `Could not inspect this product: ${error.message}` });
+    }
+  };
+
+  socket.on("message", async (raw) => {
+    try {
+      const message = JSON.parse(raw.toString());
+      if (message.type === "start") {
+        const destination = cleanUrl(message.url);
+        if (!destination) {
+          log("warn", "invalid_start_url", { sessionId });
+          return send(socket, { type: "error", message: "Please enter a valid HTTP or HTTPS URL." });
+        }
+        log("info", "browser_launch_started", { sessionId, url: safeUrl(destination) });
+        send(socket, { type: "status", status: "launching", message: "Launching secure browser…" });
+        browser = await chromium.launch({
+          headless: true,
+          args: [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+          ],
+        });
+        browser.on("disconnected", () => log("warn", "browser_disconnected", { sessionId }));
+        context = await browser.newContext({ viewport: VIEWPORT, userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36" });
+        page = await context.newPage();
+        page.on("crash", () => log("error", "page_crashed", { sessionId, url: safeUrl(page.url()) }));
+        page.on("pageerror", (error) => log("warn", "page_javascript_error", { sessionId, url: safeUrl(page.url()), error: errorDetails(error) }));
+        page.on("load", publishFrame);
+        await page.goto(destination, { waitUntil: "domcontentloaded", timeout: 45000 });
+        await publishFrame();
+        send(socket, { type: "assets", assets: [], product: {} });
+        frameTimer = setInterval(publishFrame, 1200);
+        send(socket, { type: "status", status: "live", message: "Browser connected" });
+        log("info", "browser_ready", { sessionId, url: safeUrl(page.url()), durationMs: Date.now() - connectedAt });
+      }
+      if (message.type === "click" && page) {
+        const before = page.url();
+        const clickedHref = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("a")?.href || "", { x: Number(message.x), y: Number(message.y) });
+        const navigation = page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 12000 }).catch(() => null);
+        await page.mouse.click(Number(message.x), Number(message.y));
+        await navigation;
+        await publishFrame();
+        const productClick = /\/products?\/|\/p\/|product[-_/]|\/item\//i.test(`${clickedHref} ${page.url()}`);
+        log("info", "browser_click", {
+          sessionId,
+          from: safeUrl(before),
+          to: safeUrl(page.url()),
+          clickedHref: safeUrl(clickedHref),
+          productClick,
+        });
+        if (productClick || page.url() !== before) {
+          send(socket, { type: "status", status: "loading-product", message: "Waiting for product media…" });
+          await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+          await page.waitForFunction(() => {
+            const productSchema = [...document.querySelectorAll('script[type="application/ld+json"]')]
+              .some((script) => /"@type"\s*:\s*"Product"/i.test(script.textContent || ""));
+            const readyImages = [...document.images].filter((image) => image.complete && image.naturalWidth >= 300).length;
+            return productSchema || (document.querySelector("h1") && readyImages >= 1);
+          }, null, { timeout: 10000 }).catch(() => {});
+          await page.waitForTimeout(500);
+          await publishFrame();
+          await inspect();
+        }
+      }
+      if (message.type === "scroll" && page) {
+        pendingScroll = Math.max(-2400, Math.min(2400, pendingScroll + Number(message.deltaY)));
+        void smoothScroll();
+      }
+      if (message.type === "back" && page) { await page.goBack({ waitUntil: "domcontentloaded" }); await publishFrame(); send(socket, { type: "assets", assets: [], product: {} }); }
+      if (message.type === "reload" && page) { await page.reload({ waitUntil: "domcontentloaded" }); await publishFrame(); await inspect(); }
+      if (message.type === "export" && page) await inspect();
+    } catch (error) {
+      log("error", "message_handler_failed", { sessionId, error: errorDetails(error) });
+      send(socket, { type: "error", message: error.message || "Browser session failed." });
+    }
+  });
+  socket.on("close", async () => {
+    clearInterval(frameTimer);
+    await context?.close().catch((error) => log("warn", "context_close_failed", { sessionId, error: errorDetails(error) }));
+    await browser?.close().catch((error) => log("warn", "browser_close_failed", { sessionId, error: errorDetails(error) }));
+    log("info", "session_closed", { sessionId, durationMs: Date.now() - connectedAt });
+  });
+});
+
+server.listen(PORT, () => log("info", "server_started", {
+  port: PORT,
+  activityLog: resolve(LOG_DIR, "scraper.log"),
+  errorLog: resolve(LOG_DIR, "error.log"),
+}));

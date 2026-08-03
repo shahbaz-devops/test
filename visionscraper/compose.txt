@@ -1,0 +1,38 @@
+services:
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: visionscraper-frontend
+
+    restart: unless-stopped
+
+    ports:
+      - "3015:3000"
+
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_SCRAPER_WS: ws://177.7.59.175:8788
+
+    depends_on:
+      - scraper
+
+
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile.scraper
+
+    container_name: visionscraper-scraper
+
+    restart: unless-stopped
+
+    ports:
+      - "8788:8788"
+
+    shm_size: "2gb"
+
+    environment:
+      NODE_ENV: production
